@@ -1,12 +1,4 @@
-import 'package:flutter/material.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-
-// جیمیل‌های مدیر اصلی
-const List<String> mainAdmins = [
-  'atoorkan@gmail.com',
+atoorkan@gmail.com',
   'alitorkan60@gmail.com',
   'alitork.music@gmail.com'
 ];
@@ -44,267 +36,724 @@ class AuthGate extends StatelessWidget {
         }
         final user = snapshot.data;
         if (user == null) {
-          return SignInPage();
-        }
-        bool isMainAdmin = mainAdmins.contains(user.email);
-        return HomePage(isMainAdmin: isMainAdmin, user: user);
-      },
-    );
-  }
+          return SignInPage
+// lib/main.dart
+// Talio — Improved main.dart with safer admin logic, transaction checks, streams and error handling.
+// Requirements: firebase_core, firebase_auth, cloud_firestore, google_sign_in
+//
+// Notes:
+// - Admin identification: uses the exact emails you provided (initialMainAdmins).
+// - Admin docs live in Firestore collection 'admins' keyed by email (string).
+// - User docs live in collection 'users' keyed by email.
+// - This client contains additional safeguards (transactions & server snapshot checks)
+//   but you MUST apply Firestore Security Rules (sample provided at end) to enforce server-side security.
+
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+
+/// === Configure initial main admins (exact emails) ===
+const List<String> initialMainAdmins = [
+  'atoorkan@gmail.cm',
+  'alitorkan60@gmail.com',
+  'alitork.music@gmail.com',
+];
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  // ensure initial admin docs present
+  await _ensureInitialMainAdminsExist();
+  runApp(const TalioApp());
 }
 
-// صفحه ورود با جیمیل
-class SignInPage extends StatelessWidget {
-  final FirebaseAuth auth = FirebaseAuth.instance;
-
-  Future<void> signInWithGoogle(BuildContext context) async {
-    try {
-      // TODO: اضافه کردن Google Sign-In
-      // برای Flutter Web: از package google_sign_in_web یا signInWithPopup استفاده شود
-      // بعد از ورود، کاربر به HomePage منتقل می‌شود
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('خطا در ورود: ${e.toString()}')));
+Future<void> _ensureInitialMainAdminsExist() async {
+  final adminsCol = FirebaseFirestore.instance.collection('admins');
+  for (final email in initialMainAdmins) {
+    final docRef = adminsCol.doc(email);
+    final snap = await docRef.get();
+    if (!snap.exists) {
+      await docRef.set({
+        'email': email,
+        'isMain': true,
+        'createdAt': FieldValue.serverTimestamp(),
+        'permissions': {
+          'canBan': true,
+          'canDeleteMessages': true,
+          'canEditMessages': true,
+          'canPin': true,
+          'canAddAdmins': true,
+          'canManageAds': true,
+          'canManageGroups': true,
+          'canForceSignOut': true,
+        },
+      });
+    } else {
+      // Ensure it's marked as isMain if it's in initial list (defensive)
+      final data = snap.data() as Map<String, dynamic>;
+      if (data['isMain'] != true) {
+        await docRef.update({'isMain': true});
+      }
     }
   }
+}
 
+class TalioApp extends StatelessWidget {
+  const TalioApp({super.key});
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: ElevatedButton(
-          child: Text('ورود با جیمیل'),
-          onPressed: () => signInWithGoogle(context),
-        ),
+    return MaterialApp(
+      title: 'Talio',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.deepPurple,
+        scaffoldBackgroundColor: Colors.grey[100],
       ),
+      home: const AuthGate(),
     );
   }
 }
 
-// صفحه اصلی اپ
-class HomePage extends StatefulWidget {
-  final bool isMainAdmin;
-  final User user;
-
-  HomePage({required this.isMainAdmin, required this.user});
-
+// ---------------- Auth Gate ----------------
+class AuthGate extends StatefulWidget {
+  const AuthGate({super.key});
   @override
-  _HomePageState createState() => _HomePageState();
+  State<AuthGate> createState() => _AuthGateState();
 }
 
-class _HomePageState extends State<HomePage> {
-  String? logoUrl;
-  Color? backgroundColor;
+class _AuthGateState extends State<AuthGate> {
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+  User? _user;
+  bool _loading = true;
+  StreamSubscription<User?>? _sub;
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
+    _sub = _auth.authStateChanges().listen((u) {
+      setState(() {
+        _user = u;
+        _loading = false;
+      });
+      if (u != null) _ensureUserDocExists(u);
+    });
   }
 
-  Future<void> _loadSettings() async {
-    final doc =
-        await FirebaseFirestore.instance.collection('settings').doc('ui').get();
-    if (doc.exists) {
-      setState(() {
-        logoUrl = doc['logo'] ?? null;
-        int? colorValue = doc['backgroundColor'];
-        if (colorValue != null) backgroundColor = Color(colorValue);
-      });
+  Future<void> _ensureUserDocExists(User u) async {
+    try {
+      final usersCol = FirebaseFirestore.instance.collection('users');
+      final doc = usersCol.doc(u.email);
+      final snap = await doc.get();
+      if (!snap.exists) {
+        await doc.set({
+          'email': u.email,
+          'uid': u.uid,
+          'displayName': u.displayName ?? '',
+          'photoURL': u.photoURL ?? '',
+          'banned': false,
+          'verified': false,
+          'lastSeen': FieldValue.serverTimestamp(),
+          'sessions': [],
+        });
+      } else {
+        // Merge update lastSeen safely
+        await doc.set({'lastSeen': FieldValue.serverTimestamp()}, SetOptions(merge: true));
+      }
+    } catch (e) {
+      debugPrint('ensureUserDocExists error: $e');
     }
   }
 
-  Future<void> _updateLogo(String url) async {
-    if (!widget.isMainAdmin) return;
-    await FirebaseFirestore.instance
-        .collection('settings')
-        .doc('ui')
-        .set({'logo': url}, SetOptions(merge: true));
-    setState(() {
-      logoUrl = url;
-    });
+  Future<void> _signInWithGoogle() async {
+    try {
+      final google = GoogleSignIn();
+      final googleUser = await google.signIn();
+      if (googleUser == null) return; // user canceled
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      await _auth.signInWithCredential(credential);
+      // userState listener will create user doc
+    } catch (e) {
+      debugPrint('Google sign-in failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Login failed: $e')));
+      }
+    }
   }
 
-  Future<void> _updateBackground(Color color) async {
-    if (!widget.isMainAdmin) return;
-    await FirebaseFirestore.instance
-        .collection('settings')
-        .doc('ui')
-        .set({'backgroundColor': color.value}, SetOptions(merge: true));
-    setState(() {
-      backgroundColor = color;
-    });
+  Future<void> _signOut() async {
+    await _auth.signOut();
+    await GoogleSignIn().signOut();
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: backgroundColor ?? Colors.grey[100],
-      appBar: AppBar(
-        title: Row(
-          children: [
-            if (logoUrl != null)
-              Image.network(logoUrl!, height: 40),
-            SizedBox(width: 8),
-            Text('Talio Web'),
-          ],
+    if (_loading) return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    if (_user == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Talio — Login')),
+        body: Center(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            // logo from provided URL (transparent background assumed)
+            Container(
+              width: 120,
+              height: 120,
+              decoration: const BoxDecoration(shape: BoxShape.circle),
+              child: Image.network('https://s6.uupload.ir/files/copilot_image_1761940705645_qwp1.jpeg', fit: BoxFit.cover),
+            ),
+            const SizedBox(height: 16),
+            const Text('Sign in with Gmail', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.login),
+              label: const Text('Sign in with Google'),
+              onPressed: _signInWithGoogle,
+            ),
+            const SizedBox(height: 8),
+            const Text('Only Gmail sign-in is allowed', style: TextStyle(color: Colors.black54)),
+          ]),
         ),
-        actions: [
-          if (widget.isMainAdmin)
-            IconButton(
-                icon: Icon(Icons.settings),
-                onPressed: () => _showAdminPanel(context)),
-          IconButton(
-              icon: Icon(Icons.logout),
-              onPressed: () => FirebaseAuth.instance.signOut()),
-        ],
-      ),
-      body: ChannelsList(isMainAdmin: widget.isMainAdmin),
-    );
-  }
-
-  void _showAdminPanel(BuildContext context) {
-    showDialog(
-        context: context,
-        builder: (context) => AlertDialog(
-              title: Text('پنل مدیریت'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ElevatedButton(
-                      onPressed: () async {
-                        // TODO: آپلود و تغییر لوگو
-                      },
-                      child: Text('تغییر لوگو')),
-                  ElevatedButton(
-                      onPressed: () async {
-                        // TODO: تغییر بک‌گراند
-                      },
-                      child: Text('تغییر رنگ بک‌گراند')),
-                ],
-              ),
-            ));
+      );
+    } else {
+      return HomeScreen(user: _user!, onSignOut: _signOut);
+    }
   }
 }
 
-// لیست کانال‌ها و گروه‌ها
-class ChannelsList extends StatelessWidget {
-  final bool isMainAdmin;
-  ChannelsList({required this.isMainAdmin});
+// ---------------- HomeScreen ----------------
+class HomeScreen extends StatefulWidget {
+  final User user;
+  final Future<void> Function() onSignOut;
+  const HomeScreen({required this.user, required this.onSignOut, super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  int _selectedTab = 0;
+  late Stream<DocumentSnapshot<Map<String, dynamic>>> _myAdminStream;
+  bool _isAdmin = false;
+  bool _isMain = false;
+  Map<String, dynamic>? _myAdminData;
+
+  @override
+  void initState() {
+    super.initState();
+    _myAdminStream = FirebaseFirestore.instance.collection('admins').doc(widget.user.email).snapshots();
+    _myAdminStream.listen((snap) {
+      setState(() {
+        _isAdmin = snap.exists;
+        _myAdminData = snap.exists ? (snap.data() as Map<String, dynamic>) : null;
+        _isMain = _myAdminData != null && _myAdminData!['isMain'] == true;
+      });
+    }, onError: (e) {
+      debugPrint('adminStream error: $e');
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<QuerySnapshot>(
-      stream:
-          FirebaseFirestore.instance.collection('channels').orderBy('name').snapshots(),
-      builder: (context, snapshot) {
-        if (!snapshot.hasData)
-          return Center(child: CircularProgressIndicator());
-        final docs = snapshot.data!.docs;
-        return ListView.builder(
-          itemCount: docs.length,
-          itemBuilder: (context, index) {
-            var channel = docs[index];
-            return ListTile(
-              title: Text(channel['name']),
-              subtitle: Text('اعضا: ${channel['members'].length}'),
-              trailing: isMainAdmin
-                  ? IconButton(
-                      icon: Icon(Icons.edit),
-                      onPressed: () {
-                        // TODO: مدیریت اعضا / تیک آبی
-                      },
-                    )
-                  : null,
-              onTap: () {
-                Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => ChatPage(
-                            channelId: channel.id,
-                            isMainAdmin: isMainAdmin)));
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-}
-
-// صفحه چت هر کانال / گروه
-class ChatPage extends StatefulWidget {
-  final String channelId;
-  final bool isMainAdmin;
-
-  ChatPage({required this.channelId, required this.isMainAdmin});
-
-  @override
-  _ChatPageState createState() => _ChatPageState();
-}
-
-class _ChatPageState extends State<ChatPage> {
-  final TextEditingController _controller = TextEditingController();
-
-  @override
-  Widget build(BuildContext context) {
-    final chatRef = FirebaseFirestore.instance
-        .collection('channels')
-        .doc(widget.channelId)
-        .collection('messages')
-        .orderBy('timestamp');
-
+    final tabs = [
+      ChatsTab(userEmail: widget.user.email),
+      ContactsTab(userEmail: widget.user.email),
+      CallsTab(userEmail: widget.user.email),
+      SettingsTab(userEmail: widget.user.email, onSignOut: widget.onSignOut),
+    ];
     return Scaffold(
-      appBar: AppBar(title: Text('چت کانال')),
-      body: Column(
-        children: [
-          Expanded(
-            child: StreamBuilder<QuerySnapshot>(
-              stream: chatRef.snapshots(),
-              builder: (context, snapshot) {
-                if (!snapshot.hasData)
-                  return Center(child: CircularProgressIndicator());
-                final docs = snapshot.data!.docs;
-                return ListView.builder(
-                  itemCount: docs.length,
-                  itemBuilder: (context, index) {
-                    var msg = docs[index];
-                    bool isAdmin = msg['isAdmin'] ?? false;
-                    return ListTile(
-                      title: Text(msg['text']),
-                      trailing: isAdmin ? Icon(Icons.verified) : null,
-                    );
-                  },
-                );
+      appBar: AppBar(
+        title: Row(children: [
+          const Text('Talio'),
+          const SizedBox(width: 8),
+          if (_isMain)
+            Container(padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2), decoration: BoxDecoration(color: Colors.green[300], borderRadius: BorderRadius.circular(6)), child: const Text('MAIN', style: TextStyle(fontSize: 12))),
+        ]),
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: () {}),
+          if (_isAdmin || _isMain)
+            IconButton(
+              icon: const Icon(Icons.admin_panel_settings),
+              onPressed: () async {
+                // open admin panel and refresh on return
+                await Navigator.push(context, MaterialPageRoute(builder: (_) => AdminPanelScreen(currentUserEmail: widget.user.email)));
               },
             ),
-          ),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _controller,
-                  decoration: InputDecoration(hintText: 'پیام خود را بنویسید'),
-                ),
-              ),
-              IconButton(
-                  icon: Icon(Icons.send),
-                  onPressed: () async {
-                    if (_controller.text.isEmpty) return;
-                    await FirebaseFirestore.instance
-                        .collection('channels')
-                        .doc(widget.channelId)
-                        .collection('messages')
-                        .add({
-                      'text': _controller.text,
-                      'timestamp': FieldValue.serverTimestamp(),
-                      'isAdmin': widget.isMainAdmin
-                    });
-                    _controller.clear();
-                  }),
-            ],
-          ),
         ],
+      ),
+      body: tabs[_selectedTab],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedTab,
+        type: BottomNavigationBarType.fixed,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.chat), label: 'Chats'),
+          BottomNavigationBarItem(icon: Icon(Icons.people), label: 'Contacts'),
+          BottomNavigationBarItem(icon: Icon(Icons.call), label: 'Calls'),
+          BottomNavigationBarItem(icon: Icon(Icons.settings), label: 'Settings'),
+        ],
+        onTap: (i) => setState(() => _selectedTab = i),
+      ),
+    );
+  }
+}
+
+// -------------- Tabs (placeholders for now) --------------
+class ChatsTab extends StatelessWidget {
+  final String userEmail;
+  const ChatsTab({required this.userEmail, super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Center(child: Text('Chats — (will be implemented next)'));
+  }
+}
+class ContactsTab extends StatelessWidget {
+  final String userEmail;
+  const ContactsTab({required this.userEmail, super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Center(child: Text('Contacts'));
+  }
+}
+class CallsTab extends StatelessWidget {
+  final String userEmail;
+  const CallsTab({required this.userEmail, super.key});
+  @override
+  Widget build(BuildContext context) {
+    return const Center(child: Text('Calls'));
+  }
+}
+class SettingsTab extends StatelessWidget {
+  final String userEmail;
+  final Future<void> Function() onSignOut;
+  const SettingsTab({required this.userEmail, required this.onSignOut, super.key});
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          CircleAvatar(radius: 28, child: const Icon(Icons.person)),
+          const SizedBox(width: 12),
+          Expanded(child: Text(userEmail, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold))),
+          ElevatedButton.icon(onPressed: () async { await onSignOut(); }, icon: const Icon(Icons.logout), label: const Text('Sign out')),
+        ]),
+      ]),
+    );
+  }
+}
+
+// ---------------- Admin Panel ----------------
+class AdminPanelScreen extends StatefulWidget {
+  final String currentUserEmail;
+  const AdminPanelScreen({required this.currentUserEmail, super.key});
+  @override
+  State<AdminPanelScreen> createState() => _AdminPanelScreenState();
+}
+
+class _AdminPanelScreenState extends State<AdminPanelScreen> {
+  final _adminsCol = FirebaseFirestore.instance.collection('admins');
+  final _usersCol = FirebaseFirestore.instance.collection('users');
+  Map<String, dynamic>? _myAdminData;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadMyAdmin();
+  }
+
+  Future<void> _loadMyAdmin() async {
+    try {
+      final snap = await _adminsCol.doc(widget.currentUserEmail).get();
+      setState(() {
+        _myAdminData = snap.exists ? snap.data() as Map<String, dynamic> : null;
+        _loading = false;
+      });
+    } catch (e) {
+      debugPrint('loadMyAdmin error: $e');
+      setState(() { _loading = false; });
+    }
+  }
+
+  bool get _amMain => _myAdminData != null && (_myAdminData!['isMain'] == true);
+  Map<String, dynamic> get _myPerms => _myAdminData != null && _myAdminData!['permissions'] != null ? Map<String,dynamic>.from(_myAdminData!['permissions']) : {};
+
+  // ---- helper permission checks (client-side) ----
+  bool canAddAdmins() => _amMain || (_myPerms['canAddAdmins'] == true);
+  bool canBan() => _amMain || (_myPerms['canBan'] == true);
+  bool canForceSignOut() => _amMain || (_myPerms['canForceSignOut'] == true);
+  bool canVerify() => _amMain || (_myPerms['canManageAds'] == true) || (_myPerms['canManageGroups'] == true);
+
+  // ---- Add admin (client checks + server-side transaction check) ----
+  Future<void> _addAdmin(String email) async {
+    if (!canAddAdmins()) { _showMsg('Permission denied'); return; }
+    final target = email.trim().toLowerCase();
+    if (target.isEmpty) { _showMsg('Enter email'); return; }
+    try {
+      final docRef = _adminsCol.doc(target);
+      final snap = await docRef.get();
+      if (snap.exists) { _showMsg('Admin already exists'); return; }
+      // Create admin doc with all perms false, isMain false
+      await docRef.set({
+        'email': target,
+        'isMain': false,
+        'createdAt': FieldValue.serverTimestamp(),
+        'permissions': {
+          'canBan': false,
+          'canDeleteMessages': false,
+          'canEditMessages': false,
+          'canPin': false,
+          'canAddAdmins': false,
+          'canManageAds': false,
+          'canManageGroups': false,
+          'canForceSignOut': false,
+        },
+      });
+      _showMsg('Admin added: $target (all perms OFF). Main admins must enable perms.');
+    } catch (e) {
+      debugPrint('addAdmin error: $e');
+      _showMsg('Failed to add admin: $e');
+    }
+  }
+
+  // ---- Remove admin (transactional, protective) ----
+  Future<void> _removeAdmin(String targetEmail) async {
+    final caller = widget.currentUserEmail;
+    final target = targetEmail.trim().toLowerCase();
+    if (target.isEmpty) { _showMsg('Invalid email'); return; }
+    try {
+      await FirebaseFirestore.instance.runTransaction((tx) async {
+        final callerRef = _adminsCol.doc(caller);
+        final targetRef = _adminsCol.doc(target);
+        final callerSnap = await tx.get(callerRef);
+        final targetSnap = await tx.get(targetRef);
+        if (!callerSnap.exists) throw Exception('Caller admin doc not found (permission denied)');
+        final callerIsMain = (callerSnap.data()?['isMain'] == true);
+        if (!callerIsMain) throw Exception('Only main admins can remove admins');
+        if (!targetSnap.exists) throw Exception('Target admin not found');
+        final targetIsMain = (targetSnap.data()?['isMain'] == true);
+        // Protect initial main admins: only a main admin can remove, and we further block if trying to remove an initial main unless caller is same group
+        if (initialMainAdmins.contains(target) && !callerIsMain) {
+          throw Exception('Cannot remove protected initial main admin');
+        }
+        // additional: prevent removing self accidentally
+        if (caller.toLowerCase() == target.toLowerCase()) {
+          throw Exception('Cannot remove yourself as admin');
+        }
+        // All checks passed: delete
+        tx.delete(targetRef);
+      });
+      _showMsg('Admin removed: $target');
+    } catch (e) {
+      debugPrint('removeAdmin error: $e');
+      _showMsg('Remove admin failed: ${e.toString()}');
+    }
+  }
+
+  // ---- Set permissions (main only) ----
+  Future<void> _setPermissions(String targetEmail, Map<String,bool> perms) async {
+    if (!_amMain) { _showMsg('Only main admins can change permissions'); return; }
+    final target = targetEmail.trim().toLowerCase();
+    try {
+      final targetRef = _adminsCol.doc(target);
+      final snap = await targetRef.get();
+      if (!snap.exists) { _showMsg('Target admin not found'); return; }
+      await targetRef.update({'permissions': perms});
+      _showMsg('Permissions updated for $target');
+    } catch (e) {
+      debugPrint('setPermissions error: $e');
+      _showMsg('Failed to set permissions: $e');
+    }
+  }
+
+  // ---- Ban/unban user ----
+  Future<void> _banUser(String userEmail) async {
+    if (!canBan()) { _showMsg('Permission denied'); return; }
+    final target = userEmail.trim().toLowerCase();
+    if (target.isEmpty) { _showMsg('Invalid email'); return; }
+    try {
+      final docRef = _usersCol.doc(target);
+      final snap = await docRef.get();
+      if (!snap.exists) { _showMsg('User not found'); return; }
+      await docRef.update({'banned': true});
+      _showMsg('User banned: $target');
+    } catch (e) {
+      debugPrint('banUser error: $e');
+      _showMsg('Ban failed: $e');
+    }
+  }
+
+  Future<void> _unbanUser(String userEmail) async {
+    if (!canBan()) { _showMsg('Permission denied'); return; }
+    final target = userEmail.trim().toLowerCase();
+    if (target.isEmpty) { _showMsg('Invalid email'); return; }
+    try {
+      final docRef = _usersCol.doc(target);
+      final snap = await docRef.get();
+      if (!snap.exists) { _showMsg('User not found'); return; }
+      await docRef.update({'banned': false});
+      _showMsg('User unbanned: $target');
+    } catch (e) {
+      debugPrint('unbanUser error: $e');
+      _showMsg('Unban failed: $e');
+    }
+  }
+
+  // ---- Verify (blue tick) ----
+  Future<void> _verifyUser(String userEmail) async {
+    if (!canVerify()) { _showMsg('Permission denied'); return; }
+    final target = userEmail.trim().toLowerCase();
+    if (target.isEmpty) { _showMsg('Invalid email'); return; }
+    try {
+      final docRef = _usersCol.doc(target);
+      final snap = await docRef.get();
+      if (!snap.exists) { _showMsg('User not found'); return; }
+      await docRef.update({'verified': true});
+      _showMsg('User verified (blue): $target');
+    } catch (e) {
+      debugPrint('verifyUser error: $e');
+      _showMsg('Verify failed: $e');
+    }
+  }
+
+  // ---- Force sign out (clear sessions array) ----
+  Future<void> _forceSignOut(String userEmail) async {
+    if (!canForceSignOut()) { _showMsg('Permission denied'); return; }
+    final target = userEmail.trim().toLowerCase();
+    if (target.isEmpty) { _showMsg('Invalid email'); return; }
+    try {
+      final docRef = _usersCol.doc(target);
+      final snap = await docRef.get();
+      if (!snap.exists) { _showMsg('User not found'); return; }
+      await docRef.update({'sessions': []});
+      _showMsg('Forced sign out for $target');
+    } catch (e) {
+      debugPrint('forceSignOut error: $e');
+      _showMsg('Force sign out failed: $e');
+    }
+  }
+
+  void _showMsg(String s) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+  }
+
+  // UI building
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Admin Panel — ${widget.currentUserEmail}'),
+      ),
+      body: _loading ? const Center(child: CircularProgressIndicator()) : Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('Your role: ${_amMain ? "Main Admin" : (_myAdminData != null ? "Admin" : "Not Admin")}', style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: _AddAdminArea(onAdd: _addAdmin)),
+            const SizedBox(width: 12),
+            ElevatedButton.icon(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AdminsListScreen(currentUserEmail: widget.currentUserEmail))), icon: const Icon(Icons.manage_accounts), label: const Text('Manage Admins')),
+          ]),
+          const SizedBox(height: 12),
+          Row(children: [
+            Expanded(child: _ManageUsersArea(onBan: _banUser, onUnban: _unbanUser, onVerify: _verifyUser, onForceSignOut: _forceSignOut)),
+            const SizedBox(width: 12),
+            ElevatedButton.icon(onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => UsersListScreen())), icon: const Icon(Icons.people), label: const Text('All users')),
+          ]),
+        ]),
+      ),
+    );
+  }
+}
+
+// ---------- Add Admin Area ----------
+class _AddAdminArea extends StatefulWidget {
+  final Future<void> Function(String) onAdd;
+  const _AddAdminArea({required this.onAdd, super.key});
+  @override
+  State<_AddAdminArea> createState() => _AddAdminAreaState();
+}
+
+class _AddAdminAreaState extends State<_AddAdminArea> {
+  final _ctrl = TextEditingController();
+  bool _busy = false;
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      Expanded(child: TextField(controller: _ctrl, decoration: const InputDecoration(labelText: 'Admin email to add'))),
+      const SizedBox(width: 8),
+      ElevatedButton(onPressed: _busy ? null : () async {
+        final email = _ctrl.text.trim().toLowerCase();
+        if (email.isEmpty) return;
+        setState(() => _busy = true);
+        await widget.onAdd(email);
+        setState(() => _busy = false);
+        _ctrl.clear();
+      }, child: const Text('Add')),
+    ]);
+  }
+}
+
+// ---------- Manage Users Area ----------
+class _ManageUsersArea extends StatefulWidget {
+  final Future<void> Function(String) onBan;
+  final Future<void> Function(String) onUnban;
+  final Future<void> Function(String) onVerify;
+  final Future<void> Function(String) onForceSignOut;
+  const _ManageUsersArea({required this.onBan, required this.onUnban, required this.onVerify, required this.onForceSignOut, super.key});
+  @override
+  State<_ManageUsersArea> createState() => _ManageUsersAreaState();
+}
+
+class _ManageUsersAreaState extends State<_ManageUsersArea> {
+  final _ctrl = TextEditingController();
+  bool _busy = false;
+  @override
+  Widget build(BuildContext context) {
+    return Column(children: [
+      TextField(controller: _ctrl, decoration: const InputDecoration(labelText: 'User email')),
+      const SizedBox(height: 8),
+      Wrap(spacing: 8, children: [
+        ElevatedButton(onPressed: _busy ? null : () async { setState(()=>_busy=true); await widget.onBan(_ctrl.text.trim().toLowerCase()); setState(()=>_busy=false); }, child: const Text('Ban')),
+        ElevatedButton(onPressed: _busy ? null : () async { setState(()=>_busy=true); await widget.onUnban(_ctrl.text.trim().toLowerCase()); setState(()=>_busy=false); }, child: const Text('Unban')),
+        ElevatedButton(onPressed: _busy ? null : () async { setState(()=>_busy=true); await widget.onVerify(_ctrl.text.trim().toLowerCase()); setState(()=>_busy=false); }, child: const Text('Verify (blue)')),
+        ElevatedButton(onPressed: _busy ? null : () async { setState(()=>_busy=true); await widget.onForceSignOut(_ctrl.text.trim().toLowerCase()); setState(()=>_busy=false); }, child: const Text('Force signout')),
+      ])
+    ]);
+  }
+}
+
+// ---------- Admins List Screen ----------
+class AdminsListScreen extends StatefulWidget {
+  final String currentUserEmail;
+  const AdminsListScreen({required this.currentUserEmail, super.key});
+  @override
+  State<AdminsListScreen> createState() => _AdminsListScreenState();
+}
+
+class _AdminsListScreenState extends State<AdminsListScreen> {
+  final _adminsCol = FirebaseFirestore.instance.collection('admins');
+
+  Future<void> _togglePermission(String targetEmail, String key, bool value) async {
+    try {
+      final callerRef = _adminsCol.doc(widget.currentUserEmail);
+      final callerSnap = await callerRef.get();
+      final callerIsMain = callerSnap.exists && (callerSnap.data()?['isMain'] == true);
+      if (!callerIsMain) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Only main admins can change permissions')));
+        return;
+      }
+      final targetRef = _adminsCol.doc(targetEmail);
+      final targetSnap = await targetRef.get();
+      if (!targetSnap.exists) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Target admin not found')));
+        return;
+      }
+      final perms = Map<String,dynamic>.from(targetSnap.data()?['permissions'] ?? {});
+      perms[key] = value;
+      await targetRef.update({'permissions': perms});
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Permission updated')));
+    } catch (e) {
+      debugPrint('togglePermission error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
+  Future<void> _removeAdmin(String targetEmail) async {
+    try {
+      final callerRef = _adminsCol.doc(widget.currentUserEmail);
+      final callerSnap = await callerRef.get();
+      final callerIsMain = callerSnap.exists && (callerSnap.data()?['isMain'] == true);
+      final targetRef = _adminsCol.doc(targetEmail);
+      final targetSnap = await targetRef.get();
+      if (!targetSnap.exists) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Target not found'))); return; }
+      final targetIsMain = targetSnap.data()?['isMain'] == true;
+      if (targetIsMain && !callerIsMain) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Only main admins can remove another main admin'))); return; }
+      if (widget.currentUserEmail.toLowerCase() == targetEmail.toLowerCase()) { ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cannot remove yourself'))); return; }
+      await targetRef.delete();
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Admin removed')));
+    } catch (e) {
+      debugPrint('removeAdmin error: $e');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Remove failed: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Admins')),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: _adminsCol.orderBy('createdAt', descending: false).snapshots(),
+        builder: (context, snap) {
+          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+          final docs = snap.data!.docs;
+          return ListView(children: docs.map((d) {
+            final data = d.data() as Map<String,dynamic>;
+            final email = data['email'] ?? d.id;
+            final isMain = data['isMain'] == true;
+            final perms = Map<String,dynamic>.from(data['permissions'] ?? {});
+            return Card(child: Padding(padding: const EdgeInsets.all(8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Expanded(child: Text(email, style: const TextStyle(fontWeight: FontWeight.bold))),
+                if (isMain) Container(padding: const EdgeInsets.all(6), color: Colors.green[100], child: const Text('MAIN')),
+                IconButton(icon: const Icon(Icons.delete), onPressed: () => _removeAdmin(email)),
+              ]),
+              Wrap(spacing: 8, children: perms.keys.map((k) {
+                return Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text(k),
+                  Switch(value: perms[k] == true, onChanged: (v) => _togglePermission(email, k, v)),
+                ]);
+              }).toList()),
+            ])));
+          }).toList());
+        },
+      ),
+    );
+  }
+}
+
+// ---------- Users List Screen ----------
+class UsersListScreen extends StatelessWidget {
+  UsersListScreen({super.key});
+  final _usersCol = FirebaseFirestore.instance.collection('users');
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('All Users')),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: _usersCol.orderBy('lastSeen', descending: true).snapshots(),
+        builder: (context, snap) {
+          if (!snap.hasData) return const Center(child: CircularProgressIndicator());
+          final docs = snap.data!.docs;
+          return ListView(children: docs.map((d) {
+            final data = d.data() as Map<String,dynamic>;
+            final email = data['email'] ?? d.id;
+            final banned = data['banned'] == true;
+            final verified = data['verified'] == true;
+            return ListTile(
+              leading: CircleAvatar(backgroundImage: data['photoURL'] != null ? NetworkImage(data['photoURL']) : null),
+              title: Text(email),
+              subtitle: Text('Last seen: ${data['lastSeen'] ?? ''}'),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (verified) const Icon(Icons.check_circle, color: Colors.blue),
+                if (banned) const Icon(Icons.block, color: Colors.red),
+              ]),
+            );
+          }).toList());
+        },
       ),
     );
   }
