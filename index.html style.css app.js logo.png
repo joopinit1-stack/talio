@@ -1,0 +1,311 @@
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+
+// جیمیل‌های مدیر اصلی
+const List<String> mainAdmins = [
+  'atoorkan@gmail.com',
+  'alitorkan60@gmail.com',
+  'alitork.music@gmail.com'
+];
+
+// نقطه ورود اپ
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(TalioApp());
+}
+
+class TalioApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Talio Web',
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        scaffoldBackgroundColor: Colors.grey[100],
+      ),
+      home: AuthGate(),
+    );
+  }
+}
+
+// صفحه تشخیص ورود
+class AuthGate extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return Scaffold(body: Center(child: CircularProgressIndicator()));
+        }
+        final user = snapshot.data;
+        if (user == null) {
+          return SignInPage();
+        }
+        bool isMainAdmin = mainAdmins.contains(user.email);
+        return HomePage(isMainAdmin: isMainAdmin, user: user);
+      },
+    );
+  }
+}
+
+// صفحه ورود با جیمیل
+class SignInPage extends StatelessWidget {
+  final FirebaseAuth auth = FirebaseAuth.instance;
+
+  Future<void> signInWithGoogle(BuildContext context) async {
+    try {
+      // TODO: اضافه کردن Google Sign-In
+      // برای Flutter Web: از package google_sign_in_web یا signInWithPopup استفاده شود
+      // بعد از ورود، کاربر به HomePage منتقل می‌شود
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطا در ورود: ${e.toString()}')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: ElevatedButton(
+          child: Text('ورود با جیمیل'),
+          onPressed: () => signInWithGoogle(context),
+        ),
+      ),
+    );
+  }
+}
+
+// صفحه اصلی اپ
+class HomePage extends StatefulWidget {
+  final bool isMainAdmin;
+  final User user;
+
+  HomePage({required this.isMainAdmin, required this.user});
+
+  @override
+  _HomePageState createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String? logoUrl;
+  Color? backgroundColor;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final doc =
+        await FirebaseFirestore.instance.collection('settings').doc('ui').get();
+    if (doc.exists) {
+      setState(() {
+        logoUrl = doc['logo'] ?? null;
+        int? colorValue = doc['backgroundColor'];
+        if (colorValue != null) backgroundColor = Color(colorValue);
+      });
+    }
+  }
+
+  Future<void> _updateLogo(String url) async {
+    if (!widget.isMainAdmin) return;
+    await FirebaseFirestore.instance
+        .collection('settings')
+        .doc('ui')
+        .set({'logo': url}, SetOptions(merge: true));
+    setState(() {
+      logoUrl = url;
+    });
+  }
+
+  Future<void> _updateBackground(Color color) async {
+    if (!widget.isMainAdmin) return;
+    await FirebaseFirestore.instance
+        .collection('settings')
+        .doc('ui')
+        .set({'backgroundColor': color.value}, SetOptions(merge: true));
+    setState(() {
+      backgroundColor = color;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: backgroundColor ?? Colors.grey[100],
+      appBar: AppBar(
+        title: Row(
+          children: [
+            if (logoUrl != null)
+              Image.network(logoUrl!, height: 40),
+            SizedBox(width: 8),
+            Text('Talio Web'),
+          ],
+        ),
+        actions: [
+          if (widget.isMainAdmin)
+            IconButton(
+                icon: Icon(Icons.settings),
+                onPressed: () => _showAdminPanel(context)),
+          IconButton(
+              icon: Icon(Icons.logout),
+              onPressed: () => FirebaseAuth.instance.signOut()),
+        ],
+      ),
+      body: ChannelsList(isMainAdmin: widget.isMainAdmin),
+    );
+  }
+
+  void _showAdminPanel(BuildContext context) {
+    showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+              title: Text('پنل مدیریت'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ElevatedButton(
+                      onPressed: () async {
+                        // TODO: آپلود و تغییر لوگو
+                      },
+                      child: Text('تغییر لوگو')),
+                  ElevatedButton(
+                      onPressed: () async {
+                        // TODO: تغییر بک‌گراند
+                      },
+                      child: Text('تغییر رنگ بک‌گراند')),
+                ],
+              ),
+            ));
+  }
+}
+
+// لیست کانال‌ها و گروه‌ها
+class ChannelsList extends StatelessWidget {
+  final bool isMainAdmin;
+  ChannelsList({required this.isMainAdmin});
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<QuerySnapshot>(
+      stream:
+          FirebaseFirestore.instance.collection('channels').orderBy('name').snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData)
+          return Center(child: CircularProgressIndicator());
+        final docs = snapshot.data!.docs;
+        return ListView.builder(
+          itemCount: docs.length,
+          itemBuilder: (context, index) {
+            var channel = docs[index];
+            return ListTile(
+              title: Text(channel['name']),
+              subtitle: Text('اعضا: ${channel['members'].length}'),
+              trailing: isMainAdmin
+                  ? IconButton(
+                      icon: Icon(Icons.edit),
+                      onPressed: () {
+                        // TODO: مدیریت اعضا / تیک آبی
+                      },
+                    )
+                  : null,
+              onTap: () {
+                Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                        builder: (_) => ChatPage(
+                            channelId: channel.id,
+                            isMainAdmin: isMainAdmin)));
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// صفحه چت هر کانال / گروه
+class ChatPage extends StatefulWidget {
+  final String channelId;
+  final bool isMainAdmin;
+
+  ChatPage({required this.channelId, required this.isMainAdmin});
+
+  @override
+  _ChatPageState createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    final chatRef = FirebaseFirestore.instance
+        .collection('channels')
+        .doc(widget.channelId)
+        .collection('messages')
+        .orderBy('timestamp');
+
+    return Scaffold(
+      appBar: AppBar(title: Text('چت کانال')),
+      body: Column(
+        children: [
+          Expanded(
+            child: StreamBuilder<QuerySnapshot>(
+              stream: chatRef.snapshots(),
+              builder: (context, snapshot) {
+                if (!snapshot.hasData)
+                  return Center(child: CircularProgressIndicator());
+                final docs = snapshot.data!.docs;
+                return ListView.builder(
+                  itemCount: docs.length,
+                  itemBuilder: (context, index) {
+                    var msg = docs[index];
+                    bool isAdmin = msg['isAdmin'] ?? false;
+                    return ListTile(
+                      title: Text(msg['text']),
+                      trailing: isAdmin ? Icon(Icons.verified) : null,
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _controller,
+                  decoration: InputDecoration(hintText: 'پیام خود را بنویسید'),
+                ),
+              ),
+              IconButton(
+                  icon: Icon(Icons.send),
+                  onPressed: () async {
+                    if (_controller.text.isEmpty) return;
+                    await FirebaseFirestore.instance
+                        .collection('channels')
+                        .doc(widget.channelId)
+                        .collection('messages')
+                        .add({
+                      'text': _controller.text,
+                      'timestamp': FieldValue.serverTimestamp(),
+                      'isAdmin': widget.isMainAdmin
+                    });
+                    _controller.clear();
+                  }),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
